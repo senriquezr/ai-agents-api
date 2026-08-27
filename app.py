@@ -19,3 +19,9 @@ def saludo():
     return {
         "mensaje": "Hola Stephan, tu API está funcionando"
     }
+
+@app.get("/sumar")
+def sumar(a: int, b: int):
+    return {
+        "resultado": a + b
+    }
