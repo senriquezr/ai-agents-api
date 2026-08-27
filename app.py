@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from conciliacion import ejecutar_conciliacion
 
 app = FastAPI()
 
@@ -14,14 +15,6 @@ def ping():
         "respuesta": "pong"
     }
 
-@app.get("/saludo")
-def saludo():
-    return {
-        "mensaje": "Hola Stephan, tu API está funcionando"
-    }
-
-@app.get("/sumar")
-def sumar(a: int, b: int):
-    return {
-        "resultado": a + b
-    }
+@app.get("/conciliacion")
+def conciliacion():
+    return ejecutar_conciliacion()
