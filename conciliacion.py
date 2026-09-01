@@ -1,9 +1,8 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import BinaryIO
 
+import pandas as pd
 from fastapi import UploadFile
-
 
 EXTENSIONES_PERMITIDAS = {".xlsx", ".xlsm"}
 
@@ -13,6 +12,7 @@ def guardar_archivo(
     carpeta: Path,
     nombre_destino: str,
 ) -> Path:
+
     nombre_original = archivo.filename or nombre_destino
     extension = Path(nombre_original).suffix.lower()
 
@@ -30,11 +30,6 @@ def guardar_archivo(
             f"El archivo {nombre_original} está vacío."
         )
 
-    if not contenido.startswith(b"PK"):
-        raise ValueError(
-            f"El archivo {nombre_original} no es un Excel válido."
-        )
-
     ruta_destino.write_bytes(contenido)
 
     return ruta_destino
@@ -47,15 +42,9 @@ def ejecutar_conciliacion(
     archivo_ip: UploadFile,
     archivo_re: UploadFile,
 ) -> dict:
-    archivos_recibidos = {
-        "bdep": archivo_bdep.filename,
-        "sap": archivo_sap.filename,
-        "ep": archivo_ep.filename,
-        "ip": archivo_ip.filename,
-        "re": archivo_re.filename,
-    }
 
     with TemporaryDirectory() as directorio_temporal:
+
         carpeta = Path(directorio_temporal)
 
         rutas = {
@@ -86,17 +75,30 @@ def ejecutar_conciliacion(
             ),
         }
 
-        tamanos = {
-            tipo: ruta.stat().st_size
-            for tipo, ruta in rutas.items()
-        }
+        bdep_df = pd.read_excel(rutas["bdep"])
+        sap_df = pd.read_excel(rutas["sap"])
+        ep_df = pd.read_excel(rutas["ep"])
+        ip_df = pd.read_excel(rutas["ip"])
+        re_df = pd.read_excel(rutas["re"])
 
         return {
-            "estado": "ARCHIVOS_RECIBIDOS",
+            "estado": "OK",
             "mensaje": (
-                "Los cinco archivos Excel fueron recibidos "
-                "y validados correctamente."
+                "Los cinco archivos Excel fueron "
+                "recibidos y leídos correctamente."
             ),
-            "archivos": archivos_recibidos,
-            "tamanos_bytes": tamanos,
+            "filas": {
+                "bdep": len(bdep_df),
+                "sap": len(sap_df),
+                "ep": len(ep_df),
+                "ip": len(ip_df),
+                "re": len(re_df),
+            },
+            "columnas": {
+                "bdep": list(bdep_df.columns),
+                "sap": list(sap_df.columns),
+                "ep": list(ep_df.columns),
+                "ip": list(ip_df.columns),
+                "re": list(re_df.columns),
+            }
         }
