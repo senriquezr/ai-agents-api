@@ -10,6 +10,11 @@ app = FastAPI(
         "API central para ejecutar scripts utilizados "
         "por agentes de Copilot Studio."
     ),
+    servers=[
+        {
+            "url": "https://ai-agents-api-ww4v.onrender.com"
+        }
+    ]
 )
 
 
