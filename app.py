@@ -1,10 +1,21 @@
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 from conciliacion import ejecutar_conciliacion
 
+
+class ArchivoEntrada(BaseModel):
+    name: str
+    contentBytes: str
+
+
+class SolicitudConciliacion(BaseModel):
+    archivos: list[ArchivoEntrada]
+
+
 app = FastAPI(
     title="AI Agents API",
-    version="1.0.0",
+    version="2.0.0",
     description=(
         "API central para ejecutar scripts utilizados "
         "por agentes de Copilot Studio."
@@ -13,7 +24,7 @@ app = FastAPI(
         {
             "url": "https://ai-agents-api-ww4v.onrender.com"
         }
-    ]
+    ],
 )
 
 
@@ -34,23 +45,21 @@ def ping():
 
 @app.post("/conciliacion")
 def conciliacion(
-    archivos: list[UploadFile] = File(...)
+    solicitud: SolicitudConciliacion,
 ):
     try:
         return ejecutar_conciliacion(
-            archivos=archivos
+            archivos=solicitud.archivos,
         )
 
     except ValueError as error:
         raise HTTPException(
             status_code=400,
             detail=str(error),
-        )
+        ) from error
 
     except Exception as error:
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"Error inesperado: {error}"
-            ),
-        )
+            detail=f"Error inesperado: {error}",
+        ) from error
