@@ -1,61 +1,126 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
+import os
+import time
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from conciliacion import ejecutar_conciliacion
 
 
-class SolicitudConciliacion(BaseModel):
-    bdep_name: str = Field(..., description="Nombre original del archivo BDEP.")
-    bdep_contentBytes: str = Field(..., description="Contenido Base64 del archivo BDEP.")
-    sap_name: str = Field(..., description="Nombre original del archivo SAP.")
-    sap_contentBytes: str = Field(..., description="Contenido Base64 del archivo SAP.")
-    ep_name: str = Field(..., description="Nombre original del archivo EP.")
-    ep_contentBytes: str = Field(..., description="Contenido Base64 del archivo EP.")
-    ip_name: str = Field(..., description="Nombre original del archivo IP.")
-    ip_contentBytes: str = Field(..., description="Contenido Base64 del archivo IP.")
-    re_name: str = Field(..., description="Nombre original del archivo RE.")
-    re_contentBytes: str = Field(..., description="Contenido Base64 del archivo RE.")
-
-
 app = FastAPI(
     title="AI Agents API",
-    version="3.0.0",
-    description="API para recibir cinco archivos Excel desde Copilot Studio y ejecutar procesamiento Python.",
-    servers=[{"url": "https://ai-agents-api-ww4v.onrender.com"}],
+    version="1.1.0-test",
+    description=(
+        "Prueba end-to-end: recibe 5 Excel desde Copilot Studio, "
+        "ejecuta Python y genera un Excel de resultado."
+    ),
 )
 
+RESULT_DIR = Path(os.getenv("RESULT_DIR", "/tmp/ai-agents-api-results"))
+RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
-@app.get("/")
-def home():
-    return {"status": "ok", "mensaje": "API funcionando", "version": "3.0.0"}
+RESULT_TTL_SECONDS = int(os.getenv("RESULT_TTL_SECONDS", "3600"))
+PUBLIC_BASE_URL = os.getenv(
+    "PUBLIC_BASE_URL",
+    "https://ai-agents-api-ww4v.onrender.com",
+).rstrip("/")
 
 
-@app.get("/ping")
-def ping():
-    return {"respuesta": "pong"}
+def _limpiar_resultados_expirados() -> None:
+    ahora = time.time()
+    for archivo in RESULT_DIR.glob("*.xlsx"):
+        try:
+            if ahora - archivo.stat().st_mtime > RESULT_TTL_SECONDS:
+                archivo.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "ai-agents-api", "version": "3.0.0"}
+    return {
+        "ok": True,
+        "service": "ai-agents-api",
+        "version": "1.1.0-test",
+    }
 
 
 @app.post("/conciliacion")
-def conciliacion(solicitud: SolicitudConciliacion):
+async def conciliacion(
+    request: Request,
+    bdep: UploadFile = File(..., description="Archivo Excel BDEP"),
+    sap: UploadFile = File(..., description="Archivo Excel SAP"),
+    ep: UploadFile = File(..., description="Archivo Excel EP"),
+    ip: UploadFile = File(..., description="Archivo Excel IP"),
+    re: UploadFile = File(..., description="Archivo Excel RE"),
+):
     try:
-        return ejecutar_conciliacion(
-            bdep_name=solicitud.bdep_name,
-            bdep_contentBytes=solicitud.bdep_contentBytes,
-            sap_name=solicitud.sap_name,
-            sap_contentBytes=solicitud.sap_contentBytes,
-            ep_name=solicitud.ep_name,
-            ep_contentBytes=solicitud.ep_contentBytes,
-            ip_name=solicitud.ip_name,
-            ip_contentBytes=solicitud.ip_contentBytes,
-            re_name=solicitud.re_name,
-            re_contentBytes=solicitud.re_contentBytes,
+        _limpiar_resultados_expirados()
+
+        job_id = uuid.uuid4().hex
+        nombre_salida = f"resultado_conciliacion_{job_id}.xlsx"
+        ruta_salida = RESULT_DIR / nombre_salida
+
+        resumen = await ejecutar_conciliacion(
+            bdep=bdep,
+            sap=sap,
+            ep=ep,
+            ip=ip,
+            re=re,
+            ruta_salida=ruta_salida,
         )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Error inesperado: {error}") from error
+
+        base_url = PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
+        download_url = f"{base_url}/resultados/{job_id}"
+
+        return {
+            "estado": "OK",
+            "mensaje": (
+                "Python recibió los 5 archivos y generó un Excel de resultado."
+            ),
+            "cantidad_archivos": 5,
+            "archivo_resultado_nombre": "resultado_conciliacion.xlsx",
+            "archivo_resultado_url": download_url,
+            "resumen": resumen,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error inesperado: {exc}",
+        ) from exc
+
+
+@app.get("/resultados/{job_id}")
+def descargar_resultado(job_id: str):
+    _limpiar_resultados_expirados()
+
+    if len(job_id) != 32 or not job_id.isalnum():
+        raise HTTPException(
+            status_code=404,
+            detail="Resultado no encontrado.",
+        )
+
+    ruta = RESULT_DIR / f"resultado_conciliacion_{job_id}.xlsx"
+
+    if not ruta.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="El resultado no existe o ya expiró.",
+        )
+
+    return FileResponse(
+        path=ruta,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        filename="resultado_conciliacion.xlsx",
+    )
