@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import binascii
 from io import BytesIO
-from typing import Any
 
 import pandas as pd
 
@@ -11,50 +10,22 @@ import pandas as pd
 EXTENSIONES_PERMITIDAS = (".xlsx", ".xlsm", ".xls")
 
 
-def _nombre(archivo: Any) -> str:
-    nombre = getattr(archivo, "name", None)
-    if not nombre and isinstance(archivo, dict):
-        nombre = archivo.get("name")
+def _decodificar_excel(nombre: str, contenido: str, etiqueta: str) -> tuple[str, bytes]:
     if not nombre:
-        raise ValueError("Uno de los archivos no tiene nombre.")
-    return str(nombre)
-
-
-def _contenido_base64(archivo: Any) -> str:
-    contenido = getattr(archivo, "contentBytes", None)
-    if contenido is None and isinstance(archivo, dict):
-        contenido = archivo.get("contentBytes")
-
+        raise ValueError(f"{etiqueta}: falta el nombre del archivo.")
+    if not nombre.lower().endswith(EXTENSIONES_PERMITIDAS):
+        raise ValueError(f"{etiqueta}: '{nombre}' no es un Excel permitido (.xlsx, .xlsm o .xls).")
     if not contenido:
-        raise ValueError(f"El archivo {_nombre(archivo)} no contiene contentBytes.")
+        raise ValueError(f"{etiqueta}: '{nombre}' no contiene contentBytes.")
 
     contenido = str(contenido).strip()
-
-    # Acepta tanto Base64 puro como data URI:
-    # data:application/vnd...;base64,AAAA...
     if contenido.startswith("data:") and "," in contenido:
         contenido = contenido.split(",", 1)[1]
-
-    return contenido
-
-
-def _decodificar_excel(archivo: Any, etiqueta: str) -> tuple[str, bytes]:
-    nombre = _nombre(archivo)
-
-    if not nombre.lower().endswith(EXTENSIONES_PERMITIDAS):
-        raise ValueError(
-            f"{etiqueta}: '{nombre}' no es un Excel permitido "
-            "(.xlsx, .xlsm o .xls)."
-        )
-
-    contenido = _contenido_base64(archivo)
 
     try:
         datos = base64.b64decode(contenido, validate=True)
     except (binascii.Error, ValueError) as error:
-        raise ValueError(
-            f"{etiqueta}: el contenido de '{nombre}' no es Base64 válido."
-        ) from error
+        raise ValueError(f"{etiqueta}: el contenido de '{nombre}' no es Base64 válido.") from error
 
     if not datos:
         raise ValueError(f"{etiqueta}: '{nombre}' está vacío.")
@@ -62,96 +33,61 @@ def _decodificar_excel(archivo: Any, etiqueta: str) -> tuple[str, bytes]:
     return nombre, datos
 
 
-def _inspeccionar_excel(datos: bytes, etiqueta: str, nombre: str) -> dict:
+def _validar_excel(datos: bytes, etiqueta: str, nombre: str) -> dict:
     try:
-        archivo_memoria = BytesIO(datos)
-        excel = pd.ExcelFile(archivo_memoria)
+        buffer = BytesIO(datos)
+        excel = pd.ExcelFile(buffer)
         hojas = list(excel.sheet_names)
-
         if not hojas:
             raise ValueError("El libro no contiene hojas.")
 
-        # Lee una muestra de la primera hoja para validar que pandas puede abrirla.
-        archivo_memoria.seek(0)
-        muestra = pd.read_excel(
-            archivo_memoria,
-            sheet_name=hojas[0],
-            nrows=5,
-        )
+        buffer.seek(0)
+        muestra = pd.read_excel(buffer, sheet_name=hojas[0], nrows=5)
 
         return {
             "tipo": etiqueta,
             "name": nombre,
             "bytes": len(datos),
-            "hojas": hojas,
             "primera_hoja": hojas[0],
-            "columnas_detectadas": [str(c) for c in muestra.columns],
+            "numero_hojas": len(hojas),
+            "numero_columnas_detectadas": len(muestra.columns),
         }
-
     except Exception as error:
-        raise ValueError(
-            f"{etiqueta}: no se pudo leer '{nombre}' como archivo Excel: {error}"
-        ) from error
+        raise ValueError(f"{etiqueta}: no se pudo leer '{nombre}' como Excel: {error}") from error
 
 
 def ejecutar_conciliacion(
-    bdep: Any,
-    sap: Any,
-    ep: Any,
-    ip: Any,
-    re: Any,
+    bdep_name: str,
+    bdep_contentBytes: str,
+    sap_name: str,
+    sap_contentBytes: str,
+    ep_name: str,
+    ep_contentBytes: str,
+    ip_name: str,
+    ip_contentBytes: str,
+    re_name: str,
+    re_contentBytes: str,
 ) -> dict:
-    """
-    Punto de entrada llamado por FastAPI.
-
-    Esta versión valida y decodifica los cinco archivos que llegan desde
-    Copilot Studio. La lógica contable específica debe implementarse después
-    de la sección de validación usando los bytes/dataframes ya disponibles.
-    """
-
     entradas = {
-        "BDEP": bdep,
-        "SAP": sap,
-        "EP": ep,
-        "IP": ip,
-        "RE": re,
+        "BDEP": (bdep_name, bdep_contentBytes),
+        "SAP": (sap_name, sap_contentBytes),
+        "EP": (ep_name, ep_contentBytes),
+        "IP": (ip_name, ip_contentBytes),
+        "RE": (re_name, re_contentBytes),
     }
 
-    binarios: dict[str, bytes] = {}
-    archivos_validados: list[dict] = []
-
-    for etiqueta, archivo in entradas.items():
-        nombre, datos = _decodificar_excel(archivo, etiqueta)
-        binarios[etiqueta] = datos
-        archivos_validados.append(
-            _inspeccionar_excel(
-                datos=datos,
-                etiqueta=etiqueta,
-                nombre=nombre,
-            )
-        )
-
-    # ------------------------------------------------------------------
-    # AQUÍ VA LA LÓGICA REAL DE CONCILIACIÓN.
-    #
-    # Ejemplo de cómo convertir cualquiera de los cinco archivos a DataFrame:
-    #
-    # df_bdep = pd.read_excel(BytesIO(binarios["BDEP"]))
-    # df_sap  = pd.read_excel(BytesIO(binarios["SAP"]))
-    # df_ep   = pd.read_excel(BytesIO(binarios["EP"]))
-    # df_ip   = pd.read_excel(BytesIO(binarios["IP"]))
-    # df_re   = pd.read_excel(BytesIO(binarios["RE"]))
-    #
-    # No se inventa aquí la lógica de negocio porque el conciliacion.py
-    # proporcionado originalmente solo contaba los archivos recibidos.
-    # ------------------------------------------------------------------
+    validados = {}
+    for etiqueta, (nombre, contenido) in entradas.items():
+        nombre_ok, datos = _decodificar_excel(nombre, contenido, etiqueta)
+        validados[etiqueta] = _validar_excel(datos, etiqueta, nombre_ok)
 
     return {
         "estado": "OK",
-        "mensaje": (
-            "Los cinco archivos fueron recibidos, decodificados y "
-            "validados como Excel correctamente."
-        ),
-        "cantidad_archivos": len(archivos_validados),
-        "archivos_recibidos": archivos_validados,
+        "mensaje": "Los cinco archivos fueron recibidos y validados correctamente.",
+        "cantidad_archivos": 5,
+        "bdep_recibido": validados["BDEP"]["name"],
+        "sap_recibido": validados["SAP"]["name"],
+        "ep_recibido": validados["EP"]["name"],
+        "ip_recibido": validados["IP"]["name"],
+        "re_recibido": validados["RE"]["name"],
     }
