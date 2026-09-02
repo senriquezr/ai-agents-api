@@ -1,93 +1,148 @@
 from __future__ import annotations
 
-import base64
-import binascii
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
+from fastapi import UploadFile
 
 
-EXTENSIONES_PERMITIDAS = (".xlsx", ".xlsm", ".xls")
+EXTENSIONES = (".xlsx", ".xlsm", ".xls")
 
 
-def _decodificar_excel(nombre: str, contenido: str, etiqueta: str) -> tuple[str, bytes]:
+async def _validar(
+    archivo: UploadFile,
+    tipo: str,
+) -> dict:
+    nombre = archivo.filename or ""
+
     if not nombre:
-        raise ValueError(f"{etiqueta}: falta el nombre del archivo.")
-    if not nombre.lower().endswith(EXTENSIONES_PERMITIDAS):
-        raise ValueError(f"{etiqueta}: '{nombre}' no es un Excel permitido (.xlsx, .xlsm o .xls).")
+        raise ValueError(f"{tipo}: el archivo no tiene nombre.")
+
+    if not nombre.lower().endswith(EXTENSIONES):
+        raise ValueError(
+            f"{tipo}: '{nombre}' no es un Excel permitido."
+        )
+
+    contenido = await archivo.read()
+
     if not contenido:
-        raise ValueError(f"{etiqueta}: '{nombre}' no contiene contentBytes.")
-
-    contenido = str(contenido).strip()
-    if contenido.startswith("data:") and "," in contenido:
-        contenido = contenido.split(",", 1)[1]
+        raise ValueError(
+            f"{tipo}: '{nombre}' está vacío."
+        )
 
     try:
-        datos = base64.b64decode(contenido, validate=True)
-    except (binascii.Error, ValueError) as error:
-        raise ValueError(f"{etiqueta}: el contenido de '{nombre}' no es Base64 válido.") from error
+        libro = pd.ExcelFile(BytesIO(contenido))
+        hojas = list(libro.sheet_names)
 
-    if not datos:
-        raise ValueError(f"{etiqueta}: '{nombre}' está vacío.")
-
-    return nombre, datos
-
-
-def _validar_excel(datos: bytes, etiqueta: str, nombre: str) -> dict:
-    try:
-        buffer = BytesIO(datos)
-        excel = pd.ExcelFile(buffer)
-        hojas = list(excel.sheet_names)
         if not hojas:
             raise ValueError("El libro no contiene hojas.")
 
-        buffer.seek(0)
-        muestra = pd.read_excel(buffer, sheet_name=hojas[0], nrows=5)
+        primera_hoja = hojas[0]
 
-        return {
-            "tipo": etiqueta,
-            "name": nombre,
-            "bytes": len(datos),
-            "primera_hoja": hojas[0],
-            "numero_hojas": len(hojas),
-            "numero_columnas_detectadas": len(muestra.columns),
-        }
-    except Exception as error:
-        raise ValueError(f"{etiqueta}: no se pudo leer '{nombre}' como Excel: {error}") from error
+        muestra = pd.read_excel(
+            BytesIO(contenido),
+            sheet_name=primera_hoja,
+            nrows=20,
+        )
 
-
-def ejecutar_conciliacion(
-    bdep_name: str,
-    bdep_contentBytes: str,
-    sap_name: str,
-    sap_contentBytes: str,
-    ep_name: str,
-    ep_contentBytes: str,
-    ip_name: str,
-    ip_contentBytes: str,
-    re_name: str,
-    re_contentBytes: str,
-) -> dict:
-    entradas = {
-        "BDEP": (bdep_name, bdep_contentBytes),
-        "SAP": (sap_name, sap_contentBytes),
-        "EP": (ep_name, ep_contentBytes),
-        "IP": (ip_name, ip_contentBytes),
-        "RE": (re_name, re_contentBytes),
-    }
-
-    validados = {}
-    for etiqueta, (nombre, contenido) in entradas.items():
-        nombre_ok, datos = _decodificar_excel(nombre, contenido, etiqueta)
-        validados[etiqueta] = _validar_excel(datos, etiqueta, nombre_ok)
+    except Exception as exc:
+        raise ValueError(
+            f"{tipo}: no se pudo abrir '{nombre}' como Excel: {exc}"
+        ) from exc
 
     return {
-        "estado": "OK",
-        "mensaje": "Los cinco archivos fueron recibidos y validados correctamente.",
-        "cantidad_archivos": 5,
-        "bdep_recibido": validados["BDEP"]["name"],
-        "sap_recibido": validados["SAP"]["name"],
-        "ep_recibido": validados["EP"]["name"],
-        "ip_recibido": validados["IP"]["name"],
-        "re_recibido": validados["RE"]["name"],
+        "tipo": tipo,
+        "archivo": nombre,
+        "primera_hoja": primera_hoja,
+        "numero_hojas": len(hojas),
+        "columnas_detectadas": len(muestra.columns),
+        "filas_muestra": len(muestra),
+    }
+
+
+async def ejecutar_conciliacion(
+    bdep: UploadFile,
+    sap: UploadFile,
+    ep: UploadFile,
+    ip: UploadFile,
+    re: UploadFile,
+    ruta_salida: str | Path,
+) -> dict:
+    """
+    PRUEBA MÍNIMA.
+
+    Recibe los cinco Excel, los abre con pandas y genera un nuevo
+    Excel llamado resultado_conciliacion.xlsx.
+
+    Aquí, más adelante, se reemplaza esta validación por el código
+    real de conciliación de más de 1000 líneas.
+    """
+
+    resultados = [
+        await _validar(bdep, "BDEP"),
+        await _validar(sap, "SAP"),
+        await _validar(ep, "EP"),
+        await _validar(ip, "IP"),
+        await _validar(re, "RE"),
+    ]
+
+    df_resultado = pd.DataFrame(resultados)
+
+    df_resumen = pd.DataFrame(
+        [
+            {
+                "estado": "OK",
+                "cantidad_archivos": 5,
+                "mensaje": (
+                    "Python recibió y abrió correctamente "
+                    "los cinco archivos Excel."
+                ),
+            }
+        ]
+    )
+
+    ruta_salida = Path(ruta_salida)
+    ruta_salida.parent.mkdir(parents=True, exist_ok=True)
+
+    with pd.ExcelWriter(
+        ruta_salida,
+        engine="xlsxwriter",
+    ) as writer:
+        df_resumen.to_excel(
+            writer,
+            sheet_name="Resumen",
+            index=False,
+        )
+        df_resultado.to_excel(
+            writer,
+            sheet_name="Validacion",
+            index=False,
+        )
+
+        for nombre_hoja, dataframe in {
+            "Resumen": df_resumen,
+            "Validacion": df_resultado,
+        }.items():
+            worksheet = writer.sheets[nombre_hoja]
+            worksheet.freeze_panes(1, 0)
+
+            for indice, columna in enumerate(dataframe.columns):
+                ancho = max(
+                    len(str(columna)) + 2,
+                    16,
+                )
+                worksheet.set_column(
+                    indice,
+                    indice,
+                    min(ancho, 35),
+                )
+
+    return {
+        "archivos_validados": 5,
+        "bdep": resultados[0]["archivo"],
+        "sap": resultados[1]["archivo"],
+        "ep": resultados[2]["archivo"],
+        "ip": resultados[3]["archivo"],
+        "re": resultados[4]["archivo"],
     }
