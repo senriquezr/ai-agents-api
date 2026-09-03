@@ -5,122 +5,80 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from conciliacion import ejecutar_conciliacion
 
 
-app = FastAPI(
-    title="AI Agents API",
-    version="1.1.0-test",
-    description=(
-        "Prueba end-to-end: recibe 5 Excel desde Copilot Studio, "
-        "ejecuta Python y genera un Excel de resultado."
-    ),
-)
+class SolicitudConciliacion(BaseModel):
+    attachmentsJson: str
+
+
+app = FastAPI(title="AI Agents API", version="poc-final-2.0")
 
 RESULT_DIR = Path(os.getenv("RESULT_DIR", "/tmp/ai-agents-api-results"))
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
-
-RESULT_TTL_SECONDS = int(os.getenv("RESULT_TTL_SECONDS", "3600"))
 PUBLIC_BASE_URL = os.getenv(
     "PUBLIC_BASE_URL",
     "https://ai-agents-api-ww4v.onrender.com",
 ).rstrip("/")
+TTL = int(os.getenv("RESULT_TTL_SECONDS", "3600"))
 
 
-def _limpiar_resultados_expirados() -> None:
+def limpiar():
     ahora = time.time()
-    for archivo in RESULT_DIR.glob("*.xlsx"):
+    for f in RESULT_DIR.glob("*.xlsx"):
         try:
-            if ahora - archivo.stat().st_mtime > RESULT_TTL_SECONDS:
-                archivo.unlink(missing_ok=True)
+            if ahora - f.stat().st_mtime > TTL:
+                f.unlink(missing_ok=True)
         except OSError:
             pass
 
 
 @app.get("/health")
 def health():
-    return {
-        "ok": True,
-        "service": "ai-agents-api",
-        "version": "1.1.0-test",
-    }
+    return {"ok": True, "service": "ai-agents-api", "version": "poc-final-2.0"}
 
 
 @app.post("/conciliacion")
-async def conciliacion(
-    request: Request,
-    bdep: UploadFile = File(..., description="Archivo Excel BDEP"),
-    sap: UploadFile = File(..., description="Archivo Excel SAP"),
-    ep: UploadFile = File(..., description="Archivo Excel EP"),
-    ip: UploadFile = File(..., description="Archivo Excel IP"),
-    re: UploadFile = File(..., description="Archivo Excel RE"),
-):
+def conciliacion(solicitud: SolicitudConciliacion):
     try:
-        _limpiar_resultados_expirados()
-
+        limpiar()
         job_id = uuid.uuid4().hex
-        nombre_salida = f"resultado_conciliacion_{job_id}.xlsx"
-        ruta_salida = RESULT_DIR / nombre_salida
+        salida = RESULT_DIR / f"resultado_conciliacion_{job_id}.xlsx"
 
-        resumen = await ejecutar_conciliacion(
-            bdep=bdep,
-            sap=sap,
-            ep=ep,
-            ip=ip,
-            re=re,
-            ruta_salida=ruta_salida,
+        resumen = ejecutar_conciliacion(
+            attachments_json=solicitud.attachmentsJson,
+            ruta_salida=salida,
         )
-
-        base_url = PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
-        download_url = f"{base_url}/resultados/{job_id}"
 
         return {
             "estado": "OK",
-            "mensaje": (
-                "Python recibió los 5 archivos y generó un Excel de resultado."
-            ),
-            "cantidad_archivos": 5,
+            "mensaje": "Python recibió los 5 adjuntos y generó un Excel.",
+            "cantidad_archivos": resumen["cantidad_archivos"],
             "archivo_resultado_nombre": "resultado_conciliacion.xlsx",
-            "archivo_resultado_url": download_url,
-            "resumen": resumen,
+            "archivo_resultado_url": f"{PUBLIC_BASE_URL}/resultados/{job_id}",
         }
-
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
     except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error inesperado: {exc}",
-        ) from exc
+        raise HTTPException(status_code=500, detail=f"Error inesperado: {exc}") from exc
 
 
 @app.get("/resultados/{job_id}")
 def descargar_resultado(job_id: str):
-    _limpiar_resultados_expirados()
-
+    limpiar()
     if len(job_id) != 32 or not job_id.isalnum():
-        raise HTTPException(
-            status_code=404,
-            detail="Resultado no encontrado.",
-        )
+        raise HTTPException(status_code=404, detail="Resultado no encontrado.")
 
     ruta = RESULT_DIR / f"resultado_conciliacion_{job_id}.xlsx"
-
     if not ruta.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="El resultado no existe o ya expiró.",
-        )
+        raise HTTPException(status_code=404, detail="Resultado no encontrado o expirado.")
 
     return FileResponse(
-        path=ruta,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
+        ruta,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="resultado_conciliacion.xlsx",
     )
