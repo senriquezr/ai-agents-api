@@ -1,120 +1,157 @@
 from __future__ import annotations
 
-import base64
-import json
 from io import BytesIO
 from pathlib import Path
 
-import pandas as pd
+import openpyxl
+import xlsxwriter
+from fastapi import UploadFile
 
 
-def get_ci(d, *names):
-    m = {str(k).lower(): v for k, v in d.items()}
-    for n in names:
-        if n.lower() in m:
-            return m[n.lower()]
-    return None
+async def _validar_xlsx(
+    archivo: UploadFile,
+    tipo: str,
+) -> dict:
+    nombre = archivo.filename or ""
 
+    if not nombre:
+        raise ValueError(f"{tipo}: el archivo no tiene nombre.")
 
-def extraer_registros(x):
-    if isinstance(x, list):
-        return [v for v in x if isinstance(v, dict)]
-    if isinstance(x, dict):
-        for k in ("value", "attachments", "items", "files"):
-            v = get_ci(x, k)
-            if isinstance(v, list):
-                return [i for i in v if isinstance(i, dict)]
-        if get_ci(x, "name", "filename") is not None:
-            return [x]
-        for v in x.values():
-            r = extraer_registros(v)
-            if r:
-                return r
-    return []
+    if not nombre.lower().endswith(".xlsx"):
+        raise ValueError(
+            f"{tipo}: '{nombre}' debe ser un archivo .xlsx para este POC."
+        )
 
+    contenido = await archivo.read()
 
-def decode_content(v, nombre):
-    if isinstance(v, dict):
-        v = get_ci(v, "content", "contentbytes", "value", "$content")
-    if v is None:
-        raise ValueError(f"No se encontró contenido binario para {nombre}.")
-    s = str(v).strip()
-    if s.startswith("data:") and "," in s:
-        s = s.split(",", 1)[1]
+    if not contenido:
+        raise ValueError(f"{tipo}: '{nombre}' está vacío.")
+
     try:
-        return base64.b64decode(s, validate=True)
+        libro = openpyxl.load_workbook(
+            BytesIO(contenido),
+            read_only=True,
+            data_only=True,
+        )
+        hojas = libro.sheetnames
+
+        if not hojas:
+            raise ValueError("El libro no contiene hojas.")
+
+        primera_hoja = hojas[0]
+        ws = libro[primera_hoja]
+
+        filas_muestra = 0
+        columnas_detectadas = 0
+
+        for fila in ws.iter_rows(max_row=20, values_only=True):
+            filas_muestra += 1
+            columnas_detectadas = max(
+                columnas_detectadas,
+                len(fila),
+            )
+
+        libro.close()
+
     except Exception as exc:
-        raise ValueError(f"El contenido de {nombre} no llegó como Base64 válido.") from exc
+        raise ValueError(
+            f"{tipo}: no se pudo abrir '{nombre}' como Excel: {exc}"
+        ) from exc
 
-
-def tipo_por_nombre(nombre):
-    u = nombre.upper()
-    for t in ("BDEP", "SAP", "EP", "IP", "RE"):
-        if t in u:
-            return t
-    return None
-
-
-def validar_excel(nombre, data, tipo):
-    if not nombre.lower().endswith((".xlsx", ".xlsm", ".xls")):
-        raise ValueError(f"{tipo}: {nombre} no es un Excel permitido.")
-    try:
-        libro = pd.ExcelFile(BytesIO(data))
-        hoja = libro.sheet_names[0]
-        muestra = pd.read_excel(BytesIO(data), sheet_name=hoja, nrows=20)
-    except Exception as exc:
-        raise ValueError(f"{tipo}: no se pudo abrir {nombre}: {exc}") from exc
     return {
         "tipo": tipo,
         "archivo": nombre,
-        "primera_hoja": hoja,
-        "numero_hojas": len(libro.sheet_names),
-        "columnas_detectadas": len(muestra.columns),
-        "filas_muestra": len(muestra),
+        "primera_hoja": primera_hoja,
+        "numero_hojas": len(hojas),
+        "columnas_detectadas": columnas_detectadas,
+        "filas_muestra": filas_muestra,
+        "tamano_bytes": len(contenido),
     }
 
 
-def ejecutar_conciliacion(attachments_json: str, ruta_salida: str | Path) -> dict:
-    try:
-        payload = json.loads(attachments_json)
-    except Exception as exc:
-        raise ValueError("attachmentsJson no contiene JSON válido.") from exc
+async def ejecutar_conciliacion(
+    bdep: UploadFile,
+    sap: UploadFile,
+    ep: UploadFile,
+    ip: UploadFile,
+    re: UploadFile,
+    ruta_salida: str | Path,
+) -> dict:
+    """
+    POC end-to-end.
 
-    regs = extraer_registros(payload)
-    if len(regs) != 5:
-        raise ValueError(f"Se esperaban 5 adjuntos y se recibieron {len(regs)}.")
+    Recibe los cinco Excel reales desde Copilot, los abre en Python y genera
+    resultado_conciliacion.xlsx.
 
-    encontrados = {}
-    for r in regs:
-        nombre = get_ci(r, "name", "filename", "fileName", "displayName")
-        if not nombre:
-            raise ValueError("Un adjunto no tiene nombre reconocible.")
-        nombre = str(nombre)
-        tipo = tipo_por_nombre(nombre)
-        if not tipo:
-            raise ValueError(f"No se pudo identificar {nombre} como BDEP/SAP/EP/IP/RE.")
-        if tipo in encontrados:
-            raise ValueError(f"Hay más de un archivo para {tipo}.")
+    Aquí se reemplazará después esta validación por el código real de
+    conciliación de más de 1000 líneas.
+    """
 
-        contenido = get_ci(r, "content", "contentBytes", "fileContent", "data", "$content")
-        data = decode_content(contenido, nombre)
-        encontrados[tipo] = validar_excel(nombre, data, tipo)
-
-    faltan = [t for t in ("BDEP", "SAP", "EP", "IP", "RE") if t not in encontrados]
-    if faltan:
-        raise ValueError("Faltan: " + ", ".join(faltan))
-
-    orden = ["BDEP", "SAP", "EP", "IP", "RE"]
-    df = pd.DataFrame([encontrados[t] for t in orden])
-    resumen = pd.DataFrame([{
-        "estado": "OK",
-        "cantidad_archivos": 5,
-        "mensaje": "Python recibió y abrió correctamente los cinco Excel."
-    }])
+    resultados = [
+        await _validar_xlsx(bdep, "BDEP"),
+        await _validar_xlsx(sap, "SAP"),
+        await _validar_xlsx(ep, "EP"),
+        await _validar_xlsx(ip, "IP"),
+        await _validar_xlsx(re, "RE"),
+    ]
 
     ruta_salida = Path(ruta_salida)
-    with pd.ExcelWriter(ruta_salida, engine="xlsxwriter") as writer:
-        resumen.to_excel(writer, sheet_name="Resumen", index=False)
-        df.to_excel(writer, sheet_name="Validacion", index=False)
+    ruta_salida.parent.mkdir(parents=True, exist_ok=True)
 
-    return {"cantidad_archivos": 5}
+    workbook = xlsxwriter.Workbook(ruta_salida)
+    try:
+        ws_resumen = workbook.add_worksheet("Resumen")
+        ws_validacion = workbook.add_worksheet("Validacion")
+
+        header = workbook.add_format({"bold": True})
+
+        # Resumen
+        resumen = [
+            ("estado", "OK"),
+            ("cantidad_archivos", 5),
+            (
+                "mensaje",
+                "Python recibió los cinco Excel en una sola llamada "
+                "y generó este archivo.",
+            ),
+        ]
+
+        ws_resumen.write_row(0, 0, ["Campo", "Valor"], header)
+        for idx, (campo, valor) in enumerate(resumen, start=1):
+            ws_resumen.write(idx, 0, campo)
+            ws_resumen.write(idx, 1, valor)
+
+        ws_resumen.set_column(0, 0, 24)
+        ws_resumen.set_column(1, 1, 70)
+
+        # Validación
+        columnas = [
+            "tipo",
+            "archivo",
+            "primera_hoja",
+            "numero_hojas",
+            "columnas_detectadas",
+            "filas_muestra",
+            "tamano_bytes",
+        ]
+
+        ws_validacion.write_row(0, 0, columnas, header)
+
+        for fila_idx, resultado in enumerate(resultados, start=1):
+            ws_validacion.write_row(
+                fila_idx,
+                0,
+                [resultado[col] for col in columnas],
+            )
+
+        ws_validacion.freeze_panes(1, 0)
+        ws_validacion.set_column(0, 0, 12)
+        ws_validacion.set_column(1, 2, 28)
+        ws_validacion.set_column(3, 6, 20)
+
+    finally:
+        workbook.close()
+
+    return {
+        "cantidad_archivos": 5,
+    }
